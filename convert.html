@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MARS Data Converter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --ink-900: #14181f; --ink-700: #3b4250; --ink-500: #6b7280; --ink-300: #d5d9e0;
+    --ink-200: #e7e9ee; --ink-100: #f4f5f7; --bg: #ffffff; --accent: #2f5fd6;
+    --red-fg: #9a1c1c; --red-bg: #fbe9e9; --green-fg: #1f6d43; --green-bg: #e8f4ee;
+    --shadow: 0 1px 2px rgba(20,24,31,0.06), 0 4px 14px rgba(20,24,31,0.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--ink-100); color: var(--ink-900); -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .subtitle { color: var(--ink-500); font-size: 14px; margin: 0 0 24px; line-height: 1.5; }
+  .card { background: var(--bg); border: 1px solid var(--ink-200); border-radius: 12px; box-shadow: var(--shadow); padding: 24px; margin-bottom: 20px; }
+  .dropzone {
+    border: 2px dashed var(--ink-300); border-radius: 10px; padding: 40px 20px; text-align: center;
+    color: var(--ink-500); cursor: pointer; transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone:hover, .dropzone.dragover { border-color: var(--accent); background: #f7f9ff; }
+  .dropzone strong { color: var(--ink-900); }
+  input[type="file"] { display: none; }
+  .status { margin-top: 16px; font-size: 14px; line-height: 1.6; }
+  .status.ok { color: var(--green-fg); }
+  .status.err { background: var(--red-bg); color: var(--red-fg); border: 1px solid #f0c6c6; border-radius: 8px; padding: 12px 14px; }
+  .status.info { color: var(--ink-500); }
+  .btn {
+    display: inline-block; margin-top: 14px; background: var(--accent); color: #fff; border: none;
+    border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer; text-decoration: none;
+  }
+  .btn:hover { opacity: 0.92; }
+  ol { color: var(--ink-700); font-size: 14px; line-height: 1.8; padding-left: 20px; }
+  code { background: var(--ink-100); padding: 1px 6px; border-radius: 4px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>MARS Data Converter</h1>
+  <p class="subtitle">
+    Turns your MARS workbook into the <code>data.json</code> file the Inspector Priority List site needs.
+    Everything happens in your browser &mdash; your file is never uploaded anywhere.
+  </p>
+
+  <div class="card">
+    <div class="dropzone" id="dropzone">
+      <div><strong>Drop your workbook here</strong></div>
+      <div>or click to choose a file (.xlsx or .xlsm)</div>
+      <input type="file" id="fileInput" accept=".xlsx,.xlsm,.xls,.csv" />
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <strong>How to use this</strong>
+    <ol>
+      <li>Save/have a copy of your MARS workbook (the one with the "MARS" tab).</li>
+      <li>Drop it above &mdash; you don't need to export or select columns first, this reads the "MARS" sheet directly.</li>
+      <li>When it finishes, a file called <code>data.json</code> downloads automatically.</li>
+      <li>Go to your GitHub repo, open <code>data.json</code>, use "Upload files" to replace it with the new one you just downloaded, and commit.</li>
+    </ol>
+  </div>
+</div>
+
+<script>
+const NEEDED_COLUMNS = [
+  "Control #", "Seller Company Name", "Inspector", "Insp. Schedule Date",
+  "Location", "Problem Status", "Event", "Listing", "Insp. Reqd. Date",
+  "Last Problem End Date", "Equip. Created Date", "Inspection Type",
+];
+
+function pad(n) { return String(n).padStart(2, "0"); }
+
+function toISODate(v) {
+  if (v === null || v === undefined || v === "") return null;
+  if (v instanceof Date) {
+    if (isNaN(v.getTime())) return null;
+    return v.getUTCFullYear() + "-" + pad(v.getUTCMonth() + 1) + "-" + pad(v.getUTCDate());
+  }
+  // Fallback: Excel serial number (shouldn't normally happen with cellDates:true).
+  if (typeof v === "number") {
+    const epoch = Date.UTC(1899, 11, 30);
+    const ms = epoch + v * 86400000;
+    const d = new Date(ms);
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
+  }
+  // Fallback: a text date like "7/9/2026" or "2026-07-09".
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + "-" + pad(m[2]) + "-" + pad(m[3]);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + "-" + pad(m[1]) + "-" + pad(m[2]);
+  return null;
+}
+
+const DATE_FIELDS = new Set(["Insp. Schedule Date", "Insp. Reqd. Date", "Last Problem End Date", "Equip. Created Date"]);
+
+function setStatus(html, cls) {
+  const el = document.getElementById("status");
+  el.innerHTML = html;
+  el.className = "status " + (cls || "");
+}
+
+function findHeaderKey(rowKeys, wanted) {
+  const wantedLower = wanted.trim().toLowerCase();
+  return rowKeys.find((k) => k.trim().toLowerCase() === wantedLower);
+}
+
+function handleFile(file) {
+  setStatus("Reading " + file.name + "&hellip;", "info");
+  const reader = new FileReader();
+  reader.onerror = () => setStatus("Couldn't read that file. Try again or use a different copy.", "err");
+  reader.onload = (e) => {
+    let workbook;
+    try {
+      workbook = XLSX.read(new Uint8Array(e.target.result), { type: "array", cellDates: true });
+    } catch (err) {
+      setStatus("Couldn't parse that file as an Excel workbook (" + err.message + ").", "err");
+      return;
+    }
+
+    const sheetName = workbook.SheetNames.find((n) => n.trim().toLowerCase() === "mars");
+    if (!sheetName) {
+      setStatus(
+        "Couldn't find a sheet named \"MARS\" in this workbook. Sheets found: " +
+        workbook.SheetNames.map((n) => "<code>" + n + "</code>").join(", "),
+        "err"
+      );
+      return;
+    }
+
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: null, raw: true });
+    if (rows.length === 0) {
+      setStatus("The MARS sheet looks empty.", "err");
+      return;
+    }
+
+    const headerKeys = Object.keys(rows[0]);
+    const keyMap = {};
+    const missing = [];
+    for (const col of NEEDED_COLUMNS) {
+      const found = findHeaderKey(headerKeys, col);
+      if (found) keyMap[col] = found;
+      else missing.push(col);
+    }
+    if (missing.length > 0) {
+      setStatus(
+        "This MARS sheet is missing expected column(s): " +
+        missing.map((c) => "<code>" + c + "</code>").join(", ") +
+        ". Double-check this is the right workbook/sheet.",
+        "err"
+      );
+      return;
+    }
+
+    const out = [];
+    for (const row of rows) {
+      const ctrl = row[keyMap["Control #"]];
+      const ctrlStr = ctrl === null || ctrl === undefined ? "" : String(ctrl).trim();
+      if (ctrlStr === "") continue; // matches Module2's own filter, keeps the file small
+      const rec = {};
+      for (const col of NEEDED_COLUMNS) {
+        const raw = row[keyMap[col]];
+        rec[col] = DATE_FIELDS.has(col) ? toISODate(raw) : (raw === null || raw === undefined ? null : (typeof raw === "number" && Number.isInteger(raw) ? raw : (typeof raw === "string" ? raw.trim() : raw)));
+      }
+      out.push(rec);
+    }
+
+    const json = JSON.stringify(out);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "data.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    setStatus(
+      "Done &mdash; <strong>data.json</strong> downloaded (" + out.length.toLocaleString() + " rows). " +
+      "Now upload it to your GitHub repo to replace the old one.",
+      "ok"
+    );
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("fileInput");
+
+dropzone.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  if (fileInput.files[0]) handleFile(fileInput.files[0]);
+});
+dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
+dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+dropzone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropzone.classList.remove("dragover");
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+</script>
+</body>
+</html>
